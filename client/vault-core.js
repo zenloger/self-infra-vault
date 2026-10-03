@@ -1,7 +1,7 @@
 import * as K from 'kdbxweb';
 import { argon2d, argon2id } from 'hash-wasm';
 
-export const LIMITS = Object.freeze({ file: 64 * 1024 * 1024, attachment: 8 * 1024 * 1024, memoryKiB: 256 * 1024, iterations: 50, parallelism: 16, aesRounds: 10_000_000 });
+export const LIMITS = Object.freeze({ file: 64 * 1024 * 1024, attachment: 8 * 1024 * 1024 });
 const EDITABLE = ['Title', 'UserName', 'Password', 'URL', 'Notes'];
 const fail = (code) => { throw Object.assign(new Error(code), { code }); };
 const bytes = (value) => value instanceof ArrayBuffer ? new Uint8Array(value) : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
@@ -10,18 +10,34 @@ const text = (value) => value instanceof K.ProtectedValue ? value.getText() : St
 const uuid = (value) => value.uuid.id;
 const integer = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
 
-export async function boundedArgon2(password, salt, memory, iterations, length, parallelism, type, version) {
+export function validateArgon2Parameters(memory, iterations, length, parallelism, type, version) {
   if (version !== 0x13 || ![0, 2].includes(type)) fail('UnsupportedKdf');
-  if (!integer(memory, 8, LIMITS.memoryKiB) || !integer(iterations, 1, LIMITS.iterations) ||
-      !integer(parallelism, 1, LIMITS.parallelism) || memory < parallelism * 8 ||
-      memory * iterations > 1024 * 1024 || !integer(length, 16, 64)) fail('KdfLimit');
-  return (type === 0 ? argon2d : argon2id)({ password: bytes(password), salt: bytes(salt), memorySize: memory,
-    iterations, parallelism, hashLength: length, outputType: 'binary' });
+  // These are Argon2's encoded integer ranges, not application work budgets.
+  // hash-wasm stores each parameter in a uint32; larger values would wrap.
+  if (!integer(memory, 8, 0xffffffff) || !integer(iterations, 1, 0xffffffff) ||
+      !integer(parallelism, 1, 0xffffff) || memory < parallelism * 8 ||
+      !integer(length, 4, 0xffffffff)) fail('InvalidKdf');
+  // The wasm32 allocator accepts a uint32 byte count, including one scratch
+  // block. Do not wrap it or silently lower the vault's requested memory.
+  if (memory * 1024 + 1024 > 0xffffffff) fail('ResourceLimit');
 }
-K.CryptoEngine.setArgon2Impl(boundedArgon2);
 
-// Bound the untrusted AES work factor before asking the library to decrypt.
-// Argon2 work is bounded again in the implementation above, before WASM allocation.
+export async function deriveArgon2(password, salt, memory, iterations, length, parallelism, type, version) {
+  validateArgon2Parameters(memory, iterations, length, parallelism, type, version);
+  try {
+    return await (type === 0 ? argon2d : argon2id)({ password: bytes(password), salt: bytes(salt), memorySize: memory,
+      iterations, parallelism, hashLength: length, outputType: 'binary' });
+  } catch (error) {
+    // hash-wasm constructs a typed view after memory.grow. A failed growth or
+    // typed-array allocation raises RangeError; only expose a fixed error code.
+    if (error instanceof RangeError) fail('ResourceLimit');
+    throw error;
+  }
+}
+K.CryptoEngine.setArgon2Impl(deriveArgon2);
+
+// Validate framing and exact AES round representation before library parsing.
+// Valid work factors have no policy cap; the worker can be cancelled by the UI.
 export function inspectHeader(input) {
   const data = bytes(input);
   if (data.byteLength < 16 || data.byteLength > LIMITS.file) fail('FileLimit');
@@ -31,7 +47,8 @@ export function inspectHeader(input) {
   if (major !== 3 && major !== 4) fail('InvalidVersion');
   const read64 = (offset) => {
     const n = view.getBigUint64(offset, true);
-    if (n > BigInt(LIMITS.aesRounds)) fail('KdfLimit');
+    if (n === 0n) fail('InvalidKdf');
+    if (n > BigInt(Number.MAX_SAFE_INTEGER)) fail('UnsupportedKdf');
   };
   let pos = 12;
   while (pos < data.byteLength) {

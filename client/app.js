@@ -3,8 +3,9 @@ const messages = {
   InvalidKey: 'Не удалось открыть базу: проверь мастер-пароль и ключевой файл.',
   FileCorrupt: 'Файл повреждён или не является поддерживаемой базой KDBX.',
   BadSignature: 'Это не файл KeePass KDBX.', InvalidVersion: 'Поддерживаются KDBX 3 и 4.',
-  UnsupportedKdf: 'Этот вариант KDF пока не поддерживается. Используй Argon2d/id версии 1.3 или AES-KDF.',
-  KdfLimit: 'Параметры KDF слишком тяжёлые для браузера. Открой базу в KeePass и проверь настройки.',
+  UnsupportedKdf: 'Алгоритм, версия или параметры KDF не поддерживаются криптодвижком. База не изменена.',
+  InvalidKdf: 'В файле некорректные параметры вычисления ключа. Проверь целостность базы.',
+  ResourceLimit: 'Браузерный криптодвижок не смог выделить память, которую требует база. Параметры защиты не изменены.',
   FileLimit: 'База превышает допустимый размер (до 64 МБ).', AttachmentLimit: 'Вложение превышает 8 МБ.',
   AttachmentExists: 'Вложение с таким именем уже есть. Сначала удали старое или переименуй файл.',
   WeakPassword: 'Новый мастер-пароль должен содержать не меньше 12 символов.',
@@ -30,7 +31,15 @@ let session, worker, serial = 0, generation = 0, pending = new Map(), fetches = 
 let currentName = '', currentRevision = null, createMode = false, opened = false;
 let entryId = null, entries = [], groups = [], draftDirty = false, passwordChanged = false, dirty = false;
 let recovery = null, recoveryName = '', idleTimer, lastActivity = 0;
-let saving = false, busy = false, recoveryUnsynced = false;
+let saving = false, busy = false, recoveryUnsynced = false, uploadStarted = false;
+let actionSerial = 0, operationSerial = 0, operationStarted = null, operationTimer;
+const cryptoCalls = new Set();
+const cryptoStages = {
+  unlock: 'Вычисляем ключ и открываем базу…',
+  create: 'Создаём хранилище в браузере…',
+  export: 'Вычисляем ключ и шифруем базу…',
+  merge: 'Открываем вторую версию и объединяем записи…',
+};
 const MAX_FILE = 64 * 1024 * 1024;
 const element = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
 function status(message, error = false) { $('status').textContent = message; $('status').dataset.error = String(error); }
@@ -44,14 +53,43 @@ function report(error) {
 }
 function setBusy(value) {
   busy = value;
-  for (const selector of ['#files-panel', '#unlock-form', '.vault-grid', '#conflict']) document.querySelector(selector).inert = value;
+  for (const selector of ['#files-panel', '#unlock-form', '.vault-grid', '#conflict']) {
+    const region = document.querySelector(selector); region.inert = value; region.setAttribute('aria-busy', String(value));
+  }
   $('sync').disabled = value; $('export').disabled = value;
+}
+function showOperation(stage, detail = 'Время зависит от защиты базы и устройства. Вычисления продолжатся до завершения или отмены.') {
+  $('operation-stage').textContent = stage; $('operation-detail').textContent = detail;
+  if (operationStarted !== null) return;
+  operationStarted = Date.now();
+  const serial = ++operationSerial;
+  $('operation-panel').hidden = false;
+  const tick = () => {
+    if (serial !== operationSerial) return;
+    const seconds = Math.max(0, Math.floor((Date.now() - operationStarted) / 1000));
+    const minutes = Math.floor(seconds / 60), hours = Math.floor(minutes / 60);
+    $('operation-elapsed').textContent = hours ? `${hours}:${String(minutes % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}` : `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
+    operationTimer = setTimeout(tick, 1000);
+  };
+  tick(); $('operation-cancel').focus({ preventScroll: true });
+}
+function hideOperation() {
+  const restoreFocus = document.activeElement === $('operation-cancel');
+  operationSerial++; clearTimeout(operationTimer); operationStarted = null;
+  $('operation-panel').hidden = true;
+  if (restoreFocus) {
+    const target = opened ? $('sync') : !$('unlock-panel').hidden ? $('unlock-submit') : $('refresh');
+    target.focus({ preventScroll: true });
+  }
 }
 function action(callback) { return (event) => {
   event?.preventDefault();
   if (busy) return;
+  const serial = ++actionSerial;
   setBusy(true);
-  Promise.resolve().then(() => callback(event)).catch(report).finally(() => setBusy(false));
+  Promise.resolve().then(() => { if (serial !== actionSerial) throw abortError(); return callback(event); })
+    .catch(error => { if (serial === actionSerial) report(error); })
+    .finally(() => { if (serial === actionSerial) { setBusy(false); hideOperation(); } });
 }; }
 const abortError = () => Object.assign(new Error(), { code: 'Locked', name: 'AbortError' });
 
@@ -93,6 +131,7 @@ function launchWorker() {
     const call = pending.get(data.id);
     if (!call) return;
     pending.delete(data.id);
+    if (cryptoCalls.delete(data.id) && !cryptoCalls.size) activity(true);
     data.error ? call.reject(Object.assign(new Error(), { code: data.error })) : call.resolve(data.result);
   };
   launched.onerror = () => {
@@ -103,9 +142,17 @@ function launchWorker() {
 function rpc(op, args = [], transfer = []) {
   if (!worker) return Promise.reject(abortError());
   const id = ++serial;
+  if (cryptoStages[op]) {
+    cryptoCalls.add(id); clearTimeout(idleTimer); showOperation(cryptoStages[op]);
+  }
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    worker.postMessage({ id, op, args }, transfer);
+    try { worker.postMessage({ id, op, args }, transfer); }
+    catch (error) {
+      pending.delete(id);
+      if (cryptoCalls.delete(id) && !cryptoCalls.size) activity(true);
+      reject(error);
+    }
   });
 }
 
@@ -117,30 +164,31 @@ function wipeEditor() {
 }
 function showRecovery() { $('recovery-panel').hidden = !recovery || opened; }
 function lock(force = false) {
-  if (!force && (dirty || draftDirty) && !confirm('Остались несинхронизированные изменения. Применённые изменения можно скачать из зашифрованной копии; неприменённый текст будет потерян. Заблокировать?')) return false;
-  generation++;
+  if (!force && (dirty || draftDirty) && !confirm('Остались несинхронизированные изменения. Сохранится последняя завершённая зашифрованная копия; более поздние изменения и неприменённый текст будут потеряны. Заблокировать?')) return false;
+  generation++; actionSerial++;
   for (const controller of fetches) controller.abort();
   fetches.clear();
   worker?.terminate(); worker = null;
   for (const call of pending.values()) call.reject(abortError());
-  pending.clear(); clearTimeout(idleTimer);
-  opened = false; saving = false; entries = []; groups = [];
+  pending.clear(); cryptoCalls.clear(); clearTimeout(idleTimer);
+  opened = false; saving = false; uploadStarted = false; entries = []; groups = [];
   $('entries').replaceChildren(); $('search').value = ''; $('active-name').textContent = '';
   $('workspace').hidden = true; $('unlock-panel').hidden = true; $('conflict').hidden = true;
   $('unlock-form').reset(); $('unlock-submit').disabled = false; $('unlock-name').textContent = ''; wipeEditor(); dirty = false;
   $('files-panel').hidden = !session?.authenticated; showRecovery();
+  setBusy(false); hideOperation();
   return true;
 }
-function activity() {
-  if (!opened) return;
+function activity(reset = false) {
+  if (!opened || cryptoCalls.size) return;
   const now = Date.now();
-  if (now - lastActivity < 1000) return;
+  if (reset !== true && now - lastActivity < 1000) return;
   lastActivity = now; clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => { lock(true); status('Хранилище заблокировано после 5 минут без действий.'); }, 5 * 60 * 1000);
+  idleTimer = setTimeout(() => { if (cryptoCalls.size) return; lock(true); status('Хранилище заблокировано после 5 минут без действий.'); }, 5 * 60 * 1000);
 }
 for (const type of ['pointerdown', 'keydown', 'touchstart']) document.addEventListener(type, activity, { passive: true });
 document.addEventListener('visibilitychange', () => {
-  if (opened && Date.now() - lastActivity >= 5 * 60 * 1000) { lock(true); status('Хранилище заблокировано после отсутствия.'); }
+  if (opened && !cryptoCalls.size && Date.now() - lastActivity >= 5 * 60 * 1000) { lock(true); status('Хранилище заблокировано после отсутствия.'); }
 });
 window.addEventListener('pagehide', () => lock(true));
 window.addEventListener('beforeunload', (event) => { if (dirty || draftDirty || recovery) { event.preventDefault(); event.returnValue = ''; } });
@@ -255,6 +303,7 @@ $('unlock-form').addEventListener('submit', action(async () => {
   if (keyFile?.size > 1024 * 1024) { status('Ключевой файл должен быть не больше 1 МБ.', true); return; }
   $('master').value = ''; $('master-confirm').value = '';
   $('unlock-submit').disabled = true; status('Открываем базу локально…');
+  showOperation(createMode ? 'Готовим новое хранилище…' : 'Загружаем зашифрованную базу…', 'Мастер-пароль и ключевой файл остаются в браузере.');
   try {
     const key = keyFile ? await keyFile.arrayBuffer() : undefined;
     let data;
@@ -277,7 +326,7 @@ $('unlock-form').addEventListener('submit', action(async () => {
     status(createMode ? 'База создана в браузере. Добавь записи и синхронизируй файл.' : 'База открыта локально.');
   } catch (error) {
     if (epoch === generation) {
-      if (opened) lock(true);
+      if (opened) { lock(true); report(error); }
       else {
         worker?.terminate(); worker = null;
         for (const call of pending.values()) call.reject(abortError()); pending.clear();
@@ -290,6 +339,11 @@ $('unlock-form').addEventListener('submit', action(async () => {
   }
 }));
 $('unlock-cancel').addEventListener('click', () => { lock(true); status('Открытие отменено.'); });
+$('operation-cancel').addEventListener('click', () => {
+  const mayHaveUploaded = uploadStarted;
+  lock(true);
+  status(mayHaveUploaded ? 'Операция отменена, база заблокирована. Уже отправленный файл мог сохраниться на Диске; обнови список перед повторной синхронизацией.' : 'Операция отменена, база заблокирована. Последняя завершённая зашифрованная копия доступна, если она была создана.');
+});
 $('new-vault').addEventListener('click', () => prepareUnlock('', true));
 $('refresh').addEventListener('click', action(loadFiles));
 $('search').addEventListener('input', renderEntries);
@@ -335,8 +389,10 @@ $('sync').addEventListener('click', action(async () => {
     await flushEditor(); const data = await snapshot();
     if (data.byteLength > Math.min(MAX_FILE, session.limits?.maxFileBytes || MAX_FILE)) throw Object.assign(new Error(), { code: 'FileLimit' });
     status('Отправляем зашифрованный файл на Диск…');
+    showOperation('Отправляем зашифрованный файл на Диск…', 'Сервер получает только зашифрованный файл. Уже начатую отправку отмена может не остановить.');
     const headers = { 'Content-Type': 'application/octet-stream', 'X-CSRF-Token': session.csrfToken };
     if (currentRevision) headers['If-Match'] = currentRevision; else headers['If-None-Match'] = '*';
+    uploadStarted = true;
     const response = await request(`/api/vault?name=${encodeURIComponent(currentName)}`, { method: 'PUT', headers, body: data });
     const result = await response.json(); if (epoch !== generation) throw abortError();
     currentName = result.name || currentName; currentRevision = result.revision; createMode = false;
@@ -345,12 +401,14 @@ $('sync').addEventListener('click', action(async () => {
     updateSaveState(); await loadFiles();
     status(result.sourceName && result.sourceName !== result.name ? 'Сохранена новая версия. Исходный файл сохранён.' : 'Зашифрованная база сохранена на Диске.');
   } catch (error) {
+    if (epoch !== generation) throw abortError();
     if (error.status === 409) { $('conflict').hidden = false; status('Файл изменился на Диске. Локальные изменения сохранены в памяти.', true); }
     else throw error;
-  } finally { saving = false; $('sync').disabled = false; }
+  } finally { if (epoch === generation) { saving = false; uploadStarted = false; } }
 }));
 $('merge').addEventListener('click', action(async () => {
   await flushEditor();
+  showOperation('Загружаем вторую зашифрованную версию…', 'Объединение записей будет выполнено в браузере.');
   const epoch = generation, response = await request(`/api/vault?name=${encodeURIComponent(currentName)}`);
   const revision = response.headers.get('X-Vault-Revision'), data = await response.arrayBuffer();
   if (epoch !== generation) throw abortError();
@@ -365,13 +423,16 @@ $('recovery-discard').addEventListener('click', () => {
   if (!confirm('Удалить зашифрованную копию из памяти этой страницы?')) return;
   if (recovery) new Uint8Array(recovery).fill(0); recovery = null; recoveryName = ''; recoveryUnsynced = false; showRecovery();
 });
-$('logout').addEventListener('click', action(async () => {
+$('logout').addEventListener('click', (event) => {
+  event.preventDefault();
   if (!lock()) return;
-  const response = await request('/auth/logout', { method: 'POST', headers: { 'X-CSRF-Token': session.csrfToken } });
-  await response.text();
-  session.authenticated = false; $('files-panel').hidden = true; $('files').replaceChildren(); $('account').textContent = ''; $('logout').hidden = true;
-  $('welcome').hidden = false; $('login').hidden = false; status('Выход выполнен.');
-}));
+  action(async () => {
+    const response = await request('/auth/logout', { method: 'POST', headers: { 'X-CSRF-Token': session.csrfToken } });
+    await response.text();
+    session.authenticated = false; $('files-panel').hidden = true; $('files').replaceChildren(); $('account').textContent = ''; $('logout').hidden = true;
+    $('welcome').hidden = false; $('login').hidden = false; status('Выход выполнен.');
+  })(event);
+});
 
 (async () => {
   const response = await request('/api/session'); session = await response.json();

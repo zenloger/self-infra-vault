@@ -13,6 +13,16 @@
   <header class="topbar"><a class="brand" href="/">zenlog<span> / secret</span></a><div class="session"><span id="account"></span><button id="logout" class="quiet" hidden>Выйти</button></div></header>
   <main>
     <div id="status" role="status" aria-live="polite">Проверяем соединение…</div>
+    <section id="operation-panel" class="operation-panel" aria-labelledby="operation-stage" hidden>
+      <div class="operation-progress" role="progressbar" aria-labelledby="operation-stage" aria-describedby="operation-detail"></div>
+      <div class="operation-copy">
+        <h2 id="operation-stage" role="status" aria-live="polite" aria-atomic="true"></h2>
+        <p id="operation-detail"></p>
+        <p class="operation-time">Прошло <span id="operation-elapsed" aria-live="off">0:00</span> · время завершения неизвестно</p>
+        <p class="fineprint">Отмена закроет открытую базу. Сохранится только последняя завершённая зашифрованная копия; более поздние изменения будут потеряны.</p>
+      </div>
+      <button id="operation-cancel" type="button">Отменить и заблокировать</button>
+    </section>
     <section id="welcome" class="intro">
       <p class="eyebrow">Личное хранилище · KDBX</p>
       <h1>Ключи остаются<br>у тебя.</h1>
@@ -42,7 +52,7 @@
     <section id="workspace" hidden>
       <div class="section-head workspace-head"><div><p class="eyebrow">Открыто в этом браузере</p><h2 id="active-name"></h2><p id="save-state" class="muted"></p></div><div class="actions"><button id="sync" class="primary">Синхронизировать</button><button id="export">Скачать .kdbx</button><button id="lock">Заблокировать</button></div></div>
       <div id="conflict" class="notice" hidden><strong>Исходный файл изменился на Диске.</strong><p>Твои изменения остаются в памяти. Сначала скачай зашифрованную копию. Можно объединить исходный файл с открытой базой; результат проверь и сохрани отдельной версией.</p><div class="actions"><button id="conflict-export">Скачать копию</button><button id="merge">Объединить с файлом на Диске</button></div></div>
-      <p class="fineprint">Автоблокировка после 5 минут без действий. Применяй изменения записи кнопкой ниже: неприменённый текст при автоблокировке теряется. Зашифрованная копия применённых изменений остаётся в памяти до закрытия страницы.</p>
+      <p class="fineprint">Автоблокировка после 5 минут без действий приостановлена на время вычисления ключа, шифрования и объединения. Применяй изменения записи кнопкой ниже: неприменённый текст при автоблокировке теряется. Зашифрованная копия применённых изменений остаётся в памяти до закрытия страницы.</p>
       <div class="vault-grid">
         <aside class="panel"><label>Поиск по названию и логину<input id="search" type="search" autocomplete="off" spellcheck="false"></label><button id="new-entry" class="wide">+ Запись</button><ul id="entries" class="entries"></ul><p id="no-entries" class="muted" hidden>Записей пока нет.</p></aside>
         <section class="panel editor-panel"><p id="select-entry" class="muted">Выбери запись или создай новую.</p>

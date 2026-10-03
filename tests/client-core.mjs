@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as K from 'kdbxweb';
-import { VaultCore, boundedArgon2, generatePassword, inspectHeader, LIMITS } from '../client/vault-core.js';
+import { VaultCore, deriveArgon2, validateArgon2Parameters, generatePassword, inspectHeader, LIMITS } from '../client/vault-core.js';
 
 const password = 'synthetic master password only';
 const encode = (text) => new TextEncoder().encode(text).buffer;
@@ -87,19 +87,106 @@ test('explicit merge keeps independent edits, unknown fields and attachments', a
   await assert.rejects(local.merge(await unrelated.export()));
 });
 
-test('untrusted KDF work factors rejected before allocation, crypto-random generator bounds', async () => {
+test('valid Argon2 parameters have no application memory, iteration, parallelism or combined-work cap', async () => {
+  // Validation alone exercises high work factors without allocating gigabytes.
+  for (const args of [
+    [256 * 1024 + 1, 1, 32, 1, 2, 19],
+    [64 * 1024, 51, 32, 1, 2, 19],
+    [64 * 1024, 17, 32, 1, 2, 19],
+    [1024 * 1024, 100_000, 32, 32, 0, 19],
+    [8, 0xffffffff, 32, 1, 2, 19],
+  ]) assert.doesNotThrow(() => validateArgon2Parameters(...args));
+  const p = encode('password'), s = encode('1234567890123456');
+  for (const type of [0, 2]) {
+    assert.equal((await deriveArgon2(p, s, 32, 51, 32, 1, type, 19)).byteLength, 32);
+    assert.equal((await deriveArgon2(p, s, 17 * 8, 1, 32, 17, type, 19)).byteLength, 32);
+  }
+});
+
+test('malformed or unrepresentable KDF values fail explicitly instead of wrapping or downgrading', async () => {
   const p = encode('password'), s = encode('1234567890123456');
   for (const args of [
-    [LIMITS.memoryKiB + 1, 1, 32, 1, 2, 19], [64 * 1024, 51, 32, 1, 2, 19],
-    [64 * 1024, 1, 32, 17, 2, 19], [64 * 1024, 1, 32, 1, 2, 16],
-    [64 * 1024, 1, 32, 1, 1, 19], [Infinity, 1, 32, 1, 2, 19],
-  ]) await assert.rejects(boundedArgon2(p, s, ...args));
-  const source = new VaultCore(); await source.create('test', password); source.db.setVersion(3);
-  source.db.header.keyEncryptionRounds = LIMITS.aesRounds + 1;
-  // Serialize only the header, without running the deliberately excessive KDF.
-  const stream = new K.BinaryStream(); source.db.header.generateSalts(); source.db.header.write(stream);
-  assert.throws(() => inspectHeader(stream.getWrittenBytes()), { code: 'KdfLimit' });
+    [Infinity, 1, 32, 1, 2, 19], [8.5, 1, 32, 1, 2, 19], [7, 1, 32, 1, 2, 19],
+    [8, 0, 32, 1, 2, 19], [8, 1.5, 32, 1, 2, 19], [8, 0x100000000, 32, 1, 2, 19],
+    [8, 1, 32, 0, 2, 19], [8, 1, 32, 2, 2, 19], [8, 1, 3, 1, 2, 19],
+  ]) await assert.rejects(deriveArgon2(p, s, ...args), { code: 'InvalidKdf' });
+  await assert.rejects(deriveArgon2(p, s, 8, 1, 32, 1, 2, 16), { code: 'UnsupportedKdf' });
+  await assert.rejects(deriveArgon2(p, s, 8, 1, 32, 1, 1, 19), { code: 'UnsupportedKdf' });
+  // A valid Argon2 memory parameter that cannot fit this engine's wasm32 allocator.
+  await assert.rejects(deriveArgon2(p, s, 4 * 1024 * 1024, 1, 32, 1, 2, 19), { code: 'ResourceLimit' });
+  assert.equal(Object.hasOwn(LIMITS, 'memoryKiB'), false);
+  assert.equal(Object.hasOwn(LIMITS, 'aesRounds'), false);
+});
+
+test('a real engine allocation failure produces only the sanitized ResourceLimit code', async (context) => {
+  const instantiate = WebAssembly.instantiate;
+  context.mock.method(WebAssembly, 'instantiate', async (...args) => {
+    const instance = await instantiate(...args);
+    // Simulate memory.grow exhaustion at the same hash-wasm allocation boundary
+    // without asking the test process to exhaust its actual memory.
+    if (instance.exports.Hash_SetMemorySize) return { exports: {
+      ...instance.exports, Hash_SetMemorySize: () => -1,
+    } };
+    return instance;
+  });
+  await assert.rejects(deriveArgon2(encode('password'), encode('1234567890123456'), 1024, 1, 32, 1, 2, 19),
+    { code: 'ResourceLimit', message: 'ResourceLimit' });
+});
+
+test('AES headers accept rounds above the former ten-million cap up to exact library representation', async () => {
+  for (const version of [3, 4]) {
+    const source = new VaultCore(); await source.create('AES header fixture', password);
+    if (version === 3) source.db.setVersion(3);
+    else source.db.setKdf(K.Consts.KdfId.Aes);
+    for (const rounds of [10_000_001, Number.MAX_SAFE_INTEGER]) {
+      if (version === 3) source.db.header.keyEncryptionRounds = rounds;
+      else source.db.header.kdfParameters.set('R', K.VarDictionary.ValueType.UInt64, K.Int64.from(rounds));
+      const stream = new K.BinaryStream(); source.db.header.generateSalts(); source.db.header.write(stream);
+      const data = stream.getWrittenBytes();
+      assert.equal(inspectHeader(data), version);
+      if (rounds === Number.MAX_SAFE_INTEGER) {
+        const view = new DataView(data);
+        let offset = -1;
+        for (let p = 12; p + 8 <= data.byteLength; p++) if (view.getBigUint64(p, true) === BigInt(rounds)) { offset = p; break; }
+        assert.ok(offset >= 0);
+        view.setBigUint64(offset, 0x20000000000000n, true);
+        assert.throws(() => inspectHeader(data), { code: 'UnsupportedKdf' });
+        view.setBigUint64(offset, 0n, true);
+        assert.throws(() => inspectHeader(data), { code: 'InvalidKdf' });
+      }
+    }
+  }
+});
+
+test('high-work Argon2 vault opens, edits and saves without changing its original KDF parameters', async () => {
+  const source = new VaultCore(); await source.create('high-work fixture', password);
+  source.db.header.kdfParameters.set('I', K.VarDictionary.ValueType.UInt64, K.Int64.from(17));
+  const entry = source.upsert({ fields: { Title: 'heavy vault', Password: 'synthetic secret' } });
+  // 64 MiB x 17 passes exceeded the old combined-work cap.
+  const encrypted = await source.export();
+  const opened = new VaultCore(); await opened.unlock(encrypted, password);
+  assert.equal(opened.password(entry.id), 'synthetic secret');
+  opened.upsert({ id: entry.id, fields: { Notes: 'edited after high-work unlock' } });
+  const saved = await opened.export();
+  const reopened = new VaultCore(); await reopened.unlock(saved, password);
+  assert.equal(reopened.read(entry.id).fields.Notes, 'edited after high-work unlock');
+  for (const key of ['$UUID', 'M', 'I', 'P', 'V']) {
+    assert.deepEqual(reopened.db.header.kdfParameters.get(key), source.db.header.kdfParameters.get(key), key);
+  }
+});
+
+test('AES vault roundtrip above the old rounds cap preserves the transform count', async () => {
+  const source = new VaultCore(); await source.create('AES work fixture', password); source.db.setVersion(3);
+  source.db.header.keyEncryptionRounds = 10_000_001;
+  const entry = source.upsert({ fields: { Title: 'AES', Password: 'synthetic AES secret' } });
+  const opened = new VaultCore(); await opened.unlock(await source.export(), password);
+  assert.equal(opened.password(entry.id), 'synthetic AES secret');
+  assert.equal(opened.db.header.keyEncryptionRounds, 10_000_001);
+});
+
+test('file validation and crypto-random password generator bounds remain unchanged', () => {
   assert.throws(() => inspectHeader(new ArrayBuffer(16)), { code: 'BadSignature' });
+  assert.throws(() => inspectHeader(new ArrayBuffer(LIMITS.file + 1)), { code: 'FileLimit' });
   assert.throws(() => generatePassword(15), { code: 'InvalidInput' });
   const generated = new Set(Array.from({ length: 64 }, () => generatePassword()));
   assert.equal(generated.size, 64); for (const value of generated) assert.equal(value.length, 24);
