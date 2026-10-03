@@ -1,0 +1,30 @@
+[Unit]
+Description=zenlog encrypted vault gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zenlog
+Group=zenlog
+WorkingDirectory=/home/zenlog/zenlog-vault
+EnvironmentFile=/etc/zenlog-vault.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/zenlog/zenlog-vault/.venv/bin/gunicorn --bind 127.0.0.1:8137 --workers 1 --threads 4 --timeout 180 --worker-class gthread --error-logfile - server:create_app()
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target
