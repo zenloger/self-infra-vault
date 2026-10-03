@@ -54,7 +54,17 @@
       <div id="conflict" class="notice" hidden><strong>Исходный файл изменился на Диске.</strong><p>Твои изменения остаются в памяти. Сначала скачай зашифрованную копию. Можно объединить исходный файл с открытой базой; результат проверь и сохрани отдельной версией.</p><div class="actions"><button id="conflict-export">Скачать копию</button><button id="merge">Объединить с файлом на Диске</button></div></div>
       <p class="fineprint">Автоблокировка после 5 минут без действий приостановлена на время вычисления ключа, шифрования и объединения. Применяй изменения записи кнопкой ниже: неприменённый текст при автоблокировке теряется. Зашифрованная копия применённых изменений остаётся в памяти до закрытия страницы.</p>
       <div class="vault-grid">
-        <aside class="panel"><label>Поиск по названию и логину<input id="search" type="search" autocomplete="off" spellcheck="false"></label><button id="new-entry" class="wide">+ Запись</button><ul id="entries" class="entries"></ul><p id="no-entries" class="muted" hidden>Записей пока нет.</p></aside>
+        <aside class="panel">
+          <nav class="folder-nav" aria-label="Папки KeePass">
+            <h3>Папки</h3>
+            <button id="all-folders" class="folder-select all-folders" type="button" aria-current="true"><span>Все записи</span><span id="all-folders-count" class="folder-count"></span></button>
+            <ul id="folders" class="folders"></ul>
+            <p class="fineprint">Числа — записи прямо в папке.</p>
+          </nav>
+          <p class="folder-current">Выбрано: <strong id="folder-path" role="status" aria-live="polite"></strong></p>
+          <label><span id="search-scope">Поиск по всем записям</span><input id="search" type="search" autocomplete="off" spellcheck="false" aria-describedby="folder-path" placeholder="Название, логин или путь папки"></label>
+          <button id="new-entry" class="wide">+ Запись</button><ul id="entries" class="entries"></ul><p id="no-entries" class="muted" hidden>Записей пока нет.</p>
+        </aside>
         <section class="panel editor-panel"><p id="select-entry" class="muted">Выбери запись или создай новую.</p>
           <form id="entry-form" hidden autocomplete="off">
             <label>Название<input id="entry-title" maxlength="2048" autocomplete="off" required></label>

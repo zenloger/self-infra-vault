@@ -122,8 +122,10 @@ export class VaultCore {
     const result = [];
     const visit = (group, path, recycled) => {
       const trash = recycled || group.uuid.equals(db.meta.recycleBinUuid);
-      const label = [...path, group.name || 'Группа'];
-      result.push({ id: uuid(group), name: label.join(' / '), recycled: trash });
+      const title = group.name || 'Группа';
+      const label = [...path, title];
+      result.push({ id: uuid(group), name: label.join(' / '), title,
+        parentId: group.parentGroup ? uuid(group.parentGroup) : null, depth: path.length, recycled: trash });
       for (const child of group.groups) visit(child, label, trash);
     };
     for (const group of db.groups) visit(group, [], false);

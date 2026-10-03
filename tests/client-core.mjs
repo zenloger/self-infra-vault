@@ -54,6 +54,44 @@ test('KDBX3 AES and KDBX4 Argon2d import/export, wrong credentials, tampering', 
   }
 });
 
+test('group hierarchy preserves empty folders, literal slashes and duplicate names across encrypted roundtrip', async () => {
+  const vault = new VaultCore(); await vault.create('Root / literal slash', password);
+  const root = vault.db.getDefaultGroup();
+  const first = vault.db.createGroup(root, 'Duplicate / name');
+  const second = vault.db.createGroup(root, 'Duplicate / name');
+  const empty = vault.db.createGroup(first, 'Empty');
+  const nested = vault.db.createGroup(empty, 'Nested / empty');
+  const unnamed = vault.db.createGroup(second, '');
+  const visible = vault.upsert({ groupId: second.uuid.id, fields: { Title: 'visible entry' } });
+  const removed = vault.db.createGroup(root, 'Deleted / parent');
+  const removedChild = vault.db.createGroup(removed, 'Deleted / child');
+  vault.upsert({ groupId: removedChild.uuid.id, fields: { Title: 'deleted entry' } });
+  vault.db.remove(removed);
+
+  const expected = [
+    [root, root.name, null, 0, root.name],
+    [first, first.name, root, 1, `${root.name} / ${first.name}`],
+    [empty, empty.name, first, 2, `${root.name} / ${first.name} / ${empty.name}`],
+    [nested, nested.name, empty, 3, `${root.name} / ${first.name} / ${empty.name} / ${nested.name}`],
+    [second, second.name, root, 1, `${root.name} / ${second.name}`],
+    [unnamed, 'Группа', second, 2, `${root.name} / ${second.name} / Группа`],
+  ].map(([group, title, parent, depth, name]) => ({ id: group.uuid.id, title,
+    parentId: parent?.uuid.id ?? null, depth, name, recycled: false }));
+  const listed = vault.list();
+  assert.deepEqual(listed.groups, expected);
+  assert.equal(listed.groups[1].name, listed.groups[4].name, 'full names may collide; identity and ancestry use UUIDs');
+  assert.notEqual(listed.groups[1].id, listed.groups[4].id);
+  assert.deepEqual(listed.entries.map(entry => entry.id), [visible.id]);
+  assert.equal(listed.entries[0].groupId, second.uuid.id);
+  for (const id of [vault.db.meta.recycleBinUuid.id, removed.uuid.id, removedChild.uuid.id]) {
+    assert.equal(vault.groups().find(group => group.id === id).recycled, true);
+    assert.equal(listed.groups.some(group => group.id === id), false);
+  }
+  const reopened = new VaultCore(); await reopened.unlock(await vault.export(), password);
+  assert.deepEqual(reopened.list().groups, expected);
+  assert.deepEqual(reopened.list().entries, listed.entries);
+});
+
 test('key-file credentials and deletion/recycle-bin preserve compatibility', async () => {
   const keyFile = crypto.getRandomValues(new Uint8Array(32)).buffer;
   const vault = new VaultCore(); await vault.create('keyfile test', password, keyFile);

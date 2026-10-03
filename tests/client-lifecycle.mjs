@@ -7,6 +7,28 @@ const app = await readFile(new URL('../client/app.js', import.meta.url), 'utf8')
 const html = await readFile(new URL('../client/index.html', import.meta.url), 'utf8');
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); };
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
+const descendants = node => [node, ...node.children.flatMap(descendants)];
+const folderButton = (nodes, id) => descendants(nodes.folders).find(node => node.dataset.groupId === id);
+const folderToggle = (nodes, id) => descendants(nodes.folders).find(node => node.dataset.folderToggle === id);
+const entryTitles = nodes => nodes.entries.children.map(item => item.children[0].children[0].textContent);
+const folderFixture = () => ({
+  groups: [
+    { id: 'root', title: 'Personal', name: 'Personal', parentId: null, depth: 0 },
+    { id: 'work', title: 'Work / Ops', name: 'Personal / Work / Ops', parentId: 'root', depth: 1 },
+    { id: 'shared', title: 'Same', name: 'Personal / Work / Ops / Same', parentId: 'work', depth: 2 },
+    { id: 'private', title: 'Same', name: 'Personal / Same', parentId: 'root', depth: 1 },
+    { id: 'empty', title: '<img src=x onerror=1>', name: 'Personal / <img src=x onerror=1>', parentId: 'root', depth: 1 },
+    { id: 'container', title: 'Projects', name: 'Personal / Projects', parentId: 'root', depth: 1 },
+    { id: 'nested', title: 'Archive', name: 'Personal / Projects / Archive', parentId: 'container', depth: 2 },
+  ],
+  entries: [
+    { id: 'root-entry', title: 'Root account', username: 'root-user', groupId: 'root', group: 'Personal' },
+    { id: 'work-entry', title: 'Work account', username: 'work-user', groupId: 'work', group: 'Personal / Work / Ops' },
+    { id: 'shared-entry', title: 'Child account', username: 'child-user', groupId: 'shared', group: 'Personal / Work / Ops / Same' },
+    { id: 'private-entry', title: 'Private account', username: 'private-user', groupId: 'private', group: 'Personal / Same' },
+    { id: 'nested-entry', title: 'Archived account', username: 'archive-user', groupId: 'nested', group: 'Personal / Projects / Archive' },
+  ],
+});
 
 class Element {
   constructor(tag = 'div') { this.tagName = tag; this.children = []; this.listeners = new Map(); this.dataset = {}; this.value = ''; this.hidden = false; this.disabled = false; this.inert = false; this.files = []; this.type = 'password'; this.textContent = ''; }
@@ -28,7 +50,7 @@ async function setup() {
   const grid = new Element(), document = new Element(), window = new Element(), timers = new Map(), requests = [], workers = [];
   document.getElementById = id => nodes[id]; document.createElement = tag => new Element(tag);
   document.querySelector = selector => selector === '.vault-grid' ? grid : nodes[selector.slice(1)]; document.body = new Element();
-  const controls = { put: null, body: null, bodySignal: null, revision: 'old', holdOps: new Set() };
+  const controls = { put: null, body: null, bodySignal: null, revision: 'old', holdOps: new Set(), listing: null, confirmResult: true, confirmCalls: [] };
   let timerId = 0, now = Date.now();
   class ClockDate extends Date { static now() { return now; } }
   for (const node of Object.values(nodes)) node.focus = () => { document.activeElement = node; };
@@ -53,8 +75,9 @@ async function setup() {
   class Worker {
     constructor() { this.calls = []; this.terminated = false; workers.push(this); }
     postMessage({ id, op, args }) {
-      const listing = { entries: [{ id: 'one', title: 'fixture', username: 'account', groupId: 'group', group: 'fixture' }], groups: [{ id: 'group', name: 'fixture' }] };
-      const entry = { id: 'one', groupId: 'group', fields: { Title: args[0]?.fields?.Title || 'fixture', UserName: 'account', Notes: '', URL: '' }, hasPassword: true, historyCount: 0, customFieldCount: 0, attachments: [] };
+      const listing = controls.listing || { entries: [{ id: 'one', title: 'fixture', username: 'account', groupId: 'group', group: 'fixture' }], groups: [{ id: 'group', name: 'fixture', title: 'fixture', parentId: null, depth: 0 }] };
+      const listed = listing.entries.find(entry => entry.id === (typeof args[0] === 'string' ? args[0] : args[0]?.id)) || listing.entries[0];
+      const entry = { id: listed?.id || 'one', groupId: args[0]?.groupId || listed?.groupId || listing.groups[0]?.id, fields: { Title: args[0]?.fields?.Title || listed?.title || 'fixture', UserName: listed?.username || 'account', Notes: '', URL: '' }, hasPassword: true, historyCount: 0, customFieldCount: 0, attachments: [] };
       let result = ['unlock', 'create', 'list', 'remove', 'merge'].includes(op) ? listing : ['read', 'upsert'].includes(op) ? entry : op === 'export' ? new ArrayBuffer(12) : op === 'password' ? 'synthetic password' : undefined;
       const call = { id, op, args: structuredClone(args), replied: false, reply: error => {
         call.replied = true; this.onmessage({ data: error ? { id, error } : { id, result } });
@@ -68,7 +91,7 @@ async function setup() {
   const context = vm.createContext({ document, window, Worker, fetch, AbortController, ArrayBuffer, Uint8Array, Blob, Date: ClockDate,
     URL: { createObjectURL: () => 'blob:fixture', revokeObjectURL() {} }, navigator: { clipboard: { writeText: async () => {} } },
     setTimeout: (fn, delay) => { timers.set(++timerId, { fn, delay, at: now + delay }); return timerId; }, clearTimeout: id => timers.delete(id),
-    confirm: () => true, console });
+    confirm: message => { controls.confirmCalls.push(message); return controls.confirmResult; }, console });
   vm.runInContext(app, context); await settle();
   const run = code => vm.runInContext(code, context);
   const unlock = async () => {
@@ -270,6 +293,108 @@ test('explicit lock, logout and pagehide still terminate active crypto', async (
     assert.equal(nodes['operation-panel'].hidden, true); assert.equal(run('opened'), false);
     if (trigger === 'logout') assert.equal(requests.filter(request => request.path === '/auth/logout').length, 1);
   }
+});
+
+test('folders follow UUID hierarchy, count only direct entries and keep names as plain text', async () => {
+  const { nodes, controls, workers, requests, run, unlock } = await setup(); controls.listing = folderFixture(); await unlock();
+  assert.equal(run('selectedGroupId'), null); assert.equal(nodes['all-folders']['aria-current'], 'true');
+  assert.equal(nodes['all-folders-count'].textContent, '5'); assert.equal(nodes.entries.children.length, 5);
+  assert.equal(nodes['folder-path'].textContent, 'Все записи');
+  const rootItem = nodes.folders.children[0], rootChildren = rootItem.children[1], workItem = rootChildren.children[0];
+  assert.equal(workItem.children[0].children[1].children[0].textContent, 'Work / Ops', 'slash belongs to the folder title');
+  assert.equal(workItem.children[1].children[0].children[0].children[1].dataset.groupId, 'shared');
+  assert.equal(rootChildren.children[1].children[0].children[1].dataset.groupId, 'private', 'same-named groups keep their distinct parents');
+  assert.equal(folderButton(nodes, 'root').children[1].textContent, '1');
+  assert.equal(folderButton(nodes, 'container').children[1].textContent, '0', 'nested entry is not counted as a direct entry');
+  assert.equal(folderButton(nodes, 'empty').children[0].textContent, '<img src=x onerror=1>');
+  assert.equal(folderButton(nodes, 'empty').children[0].children.length, 0, 'hostile folder names are text, not markup');
+  const calls = workers[0].calls.length, requestCount = requests.length;
+  folderButton(nodes, 'work').emit('click'); await settle();
+  assert.deepEqual(entryTitles(nodes), ['Work account']); assert.equal(nodes['folder-path'].textContent, 'Personal / Work / Ops');
+  assert.equal(folderButton(nodes, 'work')['aria-current'], 'true'); assert.equal(nodes['all-folders']['aria-current'], 'false');
+  folderButton(nodes, 'shared').emit('click'); assert.deepEqual(entryTitles(nodes), ['Child account']);
+  folderButton(nodes, 'private').emit('click'); assert.deepEqual(entryTitles(nodes), ['Private account']);
+  assert.equal(workers[0].calls.length, calls); assert.equal(requests.length, requestCount, 'folder navigation performs no RPC or network work');
+});
+
+test('search is scoped to the selected folder and empty folders explain direct-entry semantics', async () => {
+  const { nodes, controls, unlock } = await setup(); controls.listing = folderFixture(); await unlock();
+  folderButton(nodes, 'work').emit('click'); assert.equal(nodes['search-scope'].textContent, 'Поиск в выбранной папке');
+  nodes.search.value = 'Child'; nodes.search.emit('input');
+  assert.deepEqual(entryTitles(nodes), []); assert.match(nodes['no-entries'].textContent, /В этой папке ничего/);
+  nodes['all-folders'].emit('click'); assert.deepEqual(entryTitles(nodes), ['Child account']);
+  assert.equal(nodes['search-scope'].textContent, 'Поиск по всем записям');
+  nodes.search.value = ''; nodes.search.emit('input');
+  folderButton(nodes, 'empty').emit('click'); assert.equal(nodes['no-entries'].hidden, false); assert.match(nodes['no-entries'].textContent, /Создай первую/);
+  folderButton(nodes, 'container').emit('click'); assert.deepEqual(entryTitles(nodes), []); assert.match(nodes['no-entries'].textContent, /Выбери вложенную папку/);
+});
+
+test('new entries default to the selected folder while existing entries keep their own group', async () => {
+  const { nodes, controls, workers, run, unlock } = await setup(); controls.listing = folderFixture(); await unlock();
+  nodes.entries.children[3].children[0].emit('click'); await settle();
+  assert.equal(nodes['entry-group'].value, 'private', 'editing from All entries preserves the actual group');
+  folderButton(nodes, 'empty').emit('click'); nodes['new-entry'].emit('click');
+  assert.equal(nodes['entry-group'].value, 'empty');
+  nodes['entry-title'].value = 'new certificate'; nodes['entry-form'].emit('input', nodes['entry-title']);
+  nodes['entry-form'].emit('submit'); await settle();
+  assert.equal(workers[0].calls.find(call => call.op === 'upsert').args[0].groupId, 'empty');
+  assert.equal(run('selectedGroupId'), 'empty');
+});
+
+test('folder changes guard unsaved drafts, while collapsing a branch preserves the editor', async () => {
+  const { nodes, controls, run, unlock } = await setup(); controls.listing = folderFixture(); await unlock();
+  nodes.entries.children[0].children[0].emit('click'); await settle();
+  nodes['entry-title'].value = 'unfinished edit'; nodes['entry-form'].emit('input', nodes['entry-title']);
+  controls.confirmResult = false; folderButton(nodes, 'work').emit('click');
+  assert.equal(run('selectedGroupId'), null); assert.equal(run('entryId'), 'root-entry');
+  assert.equal(run('draftDirty'), true); assert.equal(nodes['entry-title'].value, 'unfinished edit');
+  const prompts = controls.confirmCalls.length;
+  folderToggle(nodes, 'work').emit('click'); assert.equal(folderToggle(nodes, 'work')['aria-expanded'], 'false');
+  assert.equal(run('draftDirty'), true); assert.equal(controls.confirmCalls.length, prompts, 'disclosure alone never discards the editor');
+  controls.confirmResult = true; folderButton(nodes, 'private').emit('click');
+  assert.equal(run('selectedGroupId'), 'private'); assert.equal(run('draftDirty'), false); assert.equal(nodes['entry-form'].hidden, true);
+  nodes['new-entry'].emit('click'); nodes['entry-title'].value = 'another unfinished edit'; nodes['entry-form'].emit('input', nodes['entry-title']);
+  controls.confirmResult = false; nodes['all-folders'].emit('click');
+  assert.equal(run('selectedGroupId'), 'private'); assert.equal(run('draftDirty'), true);
+});
+
+test('list refresh preserves selection and collapsed branches; lock and another database clear them', async () => {
+  const { nodes, controls, run, unlock } = await setup(); controls.listing = folderFixture(); await unlock();
+  folderButton(nodes, 'private').emit('click'); folderToggle(nodes, 'work').emit('click');
+  const listing = folderFixture(); listing.entries.push({ id: 'additional', title: 'More private', username: '', groupId: 'private', group: 'Personal / Same' });
+  run(`setListing(${JSON.stringify(listing)})`);
+  assert.equal(run('selectedGroupId'), 'private'); assert.deepEqual(entryTitles(nodes), ['Private account', 'More private']);
+  assert.equal(folderToggle(nodes, 'work')['aria-expanded'], 'false'); assert.equal(folderButton(nodes, 'private').children[1].textContent, '2');
+  run('lock(true)');
+  assert.equal(nodes.folders.children.length, 0); assert.equal(nodes['folder-path'].textContent, ''); assert.equal(nodes['all-folders-count'].textContent, '');
+  assert.equal(run('selectedGroupId'), null); assert.equal(run('collapsedGroups.size'), 0); assert.equal(run('folderButtons.size'), 0);
+  controls.listing = { groups: [{ id: 'next-root', title: 'Another database', name: 'Another database', parentId: null, depth: 0 }], entries: [] };
+  run("prepareUnlock('another.kdbx', false)"); nodes.master.value = 'synthetic master'; nodes['unlock-form'].emit('submit'); await settle();
+  assert.equal(run('selectedGroupId'), null); assert.equal(nodes['folder-path'].textContent, 'Все записи');
+  assert.equal(folderButton(nodes, 'next-root').children[0].textContent, 'Another database'); assert.equal(folderButton(nodes, 'private'), undefined);
+});
+
+test('folder selection, disclosure and new-entry actions cannot mutate the UI during encryption', async () => {
+  const { nodes, controls, workers, run, unlock } = await setup(); controls.listing = folderFixture(); await unlock();
+  controls.holdOps.add('export'); nodes.sync.emit('click'); await settle();
+  const callCount = workers[0].calls.length;
+  folderButton(nodes, 'private').emit('click'); folderToggle(nodes, 'work').emit('click'); nodes['new-entry'].emit('click');
+  assert.equal(run('selectedGroupId'), null); assert.equal(folderToggle(nodes, 'work')['aria-expanded'], 'true');
+  assert.equal(nodes['entry-form'].hidden, true); assert.equal(workers[0].calls.length, callCount);
+  nodes['operation-cancel'].emit('click'); await settle();
+});
+
+test('folder navigation uses labelled disclosures, a search scope and touch-sized controls', async () => {
+  const { nodes, controls, unlock } = await setup(); controls.listing = folderFixture(); await unlock();
+  const toggle = folderToggle(nodes, 'work'), branch = descendants(nodes.folders).find(node => node.id === toggle['aria-controls']);
+  assert.ok(branch); assert.equal(branch.hidden, false); assert.equal(toggle['aria-expanded'], 'true');
+  assert.match(toggle['aria-label'], /Свернуть папку/); toggle.emit('click');
+  assert.equal(branch.hidden, true); assert.equal(toggle['aria-expanded'], 'false'); assert.match(toggle['aria-label'], /Развернуть папку/);
+  assert.match(html, /<nav class="folder-nav" aria-label="Папки KeePass">/);
+  assert.match(html, /id="search"[^>]*aria-describedby="folder-path"/);
+  const css = await readFile(new URL('../client/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.folder-toggle,\.folder-spacer\{[^}]*min-height:44px/);
+  assert.match(css, /@media\(max-width:800px\)\{\.folders\{max-height:240px\}/);
 });
 
 test('loader is accessible, outside inert forms, responsive and respects reduced motion', async () => {

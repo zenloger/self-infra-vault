@@ -30,6 +30,8 @@ const messages = {
 let session, worker, serial = 0, generation = 0, pending = new Map(), fetches = new Set();
 let currentName = '', currentRevision = null, createMode = false, opened = false;
 let entryId = null, entries = [], groups = [], draftDirty = false, passwordChanged = false, dirty = false;
+let selectedGroupId = null;
+const collapsedGroups = new Set(), folderButtons = new Map();
 let recovery = null, recoveryName = '', idleTimer, lastActivity = 0;
 let saving = false, busy = false, recoveryUnsynced = false, uploadStarted = false;
 let actionSerial = 0, operationSerial = 0, operationStarted = null, operationTimer;
@@ -172,6 +174,9 @@ function lock(force = false) {
   for (const call of pending.values()) call.reject(abortError());
   pending.clear(); cryptoCalls.clear(); clearTimeout(idleTimer);
   opened = false; saving = false; uploadStarted = false; entries = []; groups = [];
+  selectedGroupId = null; collapsedGroups.clear(); folderButtons.clear();
+  $('folders').replaceChildren(); $('folder-path').textContent = ''; $('all-folders-count').textContent = '';
+  $('search-scope').textContent = 'Поиск по всем записям'; $('all-folders').setAttribute('aria-current', 'true');
   $('entries').replaceChildren(); $('search').value = ''; $('active-name').textContent = '';
   $('workspace').hidden = true; $('unlock-panel').hidden = true; $('conflict').hidden = true;
   $('unlock-form').reset(); $('unlock-submit').disabled = false; $('unlock-name').textContent = ''; wipeEditor(); dirty = false;
@@ -242,11 +247,67 @@ function prepareUnlock(name, creating) {
   $('unlock-submit').textContent = creating ? 'Создать локально' : 'Открыть';
   $('unlock-panel').hidden = false; (creating ? $('new-name') : $('master')).focus();
 }
+function updateFolderSelection() {
+  const selected = groups.find(group => group.id === selectedGroupId);
+  $('all-folders').setAttribute('aria-current', String(selectedGroupId === null));
+  for (const [id, button] of folderButtons) button.setAttribute('aria-current', String(id === selectedGroupId));
+  $('folder-path').textContent = selected ? selected.name : 'Все записи';
+  $('search-scope').textContent = selected ? 'Поиск в выбранной папке' : 'Поиск по всем записям';
+}
+function selectFolder(id) {
+  if (busy || !opened || id === selectedGroupId || (id !== null && !folderButtons.has(id))) return;
+  if (draftDirty && !confirm('Отменить неприменённые изменения записи и перейти в другую папку?')) return;
+  wipeEditor(); selectedGroupId = id; updateFolderSelection(); renderEntries(); updateSaveState();
+}
+function renderFolders() {
+  $('folders').replaceChildren(); folderButtons.clear();
+  $('all-folders-count').textContent = String(entries.length);
+  const byId = new Map(groups.map(group => [group.id, group])), children = new Map(), counts = new Map();
+  for (const entry of entries) counts.set(entry.groupId, (counts.get(entry.groupId) || 0) + 1);
+  for (const group of groups) {
+    const parent = byId.has(group.parentId) ? group.parentId : null;
+    if (!children.has(parent)) children.set(parent, []);
+    children.get(parent).push(group);
+  }
+  let branchId = 0;
+  const appendGroup = (group, list) => {
+    const item = element('li'), row = element('div', undefined, 'folder-row');
+    const title = group.title || 'Без названия', count = counts.get(group.id) || 0;
+    const button = element('button', undefined, 'folder-select'); button.type = 'button';
+    button.dataset.groupId = group.id; button.setAttribute('aria-label', `${group.name}. Записей прямо в папке: ${count}.`);
+    button.append(element('span', title, 'folder-title'), element('span', String(count), 'folder-count'));
+    button.addEventListener('click', () => selectFolder(group.id)); folderButtons.set(group.id, button);
+    const descendants = children.get(group.id) || [];
+    if (descendants.length) {
+      const nested = element('ul', undefined, 'folder-children'), toggle = element('button', undefined, 'folder-toggle');
+      nested.id = `folder-children-${++branchId}`; toggle.type = 'button'; toggle.dataset.folderToggle = group.id;
+      toggle.setAttribute('aria-controls', nested.id);
+      const updateToggle = () => {
+        nested.hidden = collapsedGroups.has(group.id); toggle.textContent = nested.hidden ? '▸' : '▾';
+        toggle.setAttribute('aria-expanded', String(!nested.hidden));
+        toggle.setAttribute('aria-label', `${nested.hidden ? 'Развернуть' : 'Свернуть'} папку «${title}»`);
+      };
+      toggle.addEventListener('click', () => {
+        if (busy || !opened) return;
+        collapsedGroups.has(group.id) ? collapsedGroups.delete(group.id) : collapsedGroups.add(group.id); updateToggle();
+      });
+      updateToggle(); row.append(toggle, button); item.append(row, nested);
+      for (const child of descendants) appendGroup(child, nested);
+    } else {
+      const spacer = element('span', undefined, 'folder-spacer'); spacer.setAttribute('aria-hidden', 'true');
+      row.append(spacer, button); item.append(row);
+    }
+    list.append(item);
+  };
+  for (const group of children.get(null) || []) appendGroup(group, $('folders'));
+  updateFolderSelection();
+}
 function renderEntries() {
   const query = $('search').value.toLocaleLowerCase();
   $('entries').replaceChildren();
-  const filtered = entries.filter(e => `${e.title}\n${e.username}\n${e.group}`.toLocaleLowerCase().includes(query));
+  const filtered = entries.filter(e => (selectedGroupId === null || e.groupId === selectedGroupId) && `${e.title}\n${e.username}\n${e.group}`.toLocaleLowerCase().includes(query));
   $('no-entries').hidden = filtered.length !== 0;
+  $('no-entries').textContent = query ? (selectedGroupId === null ? 'Ничего не найдено.' : 'В этой папке ничего не найдено.') : selectedGroupId === null ? 'В базе пока нет записей.' : groups.some(group => group.parentId === selectedGroupId) ? 'В этой папке нет записей. Выбери вложенную папку или создай запись здесь.' : 'В этой папке пока нет записей. Создай первую запись.';
   for (const entry of filtered) {
     const li = element('li'), button = element('button');
     button.setAttribute('aria-current', String(entry.id === entryId));
@@ -258,11 +319,17 @@ function renderEntries() {
     li.append(button); $('entries').append(li);
   }
 }
-function setListing(data) { entries = data.entries; groups = data.groups; renderEntries(); }
+function setListing(data) {
+  entries = data.entries; groups = data.groups;
+  const ids = new Set(groups.map(group => group.id));
+  if (selectedGroupId !== null && !ids.has(selectedGroupId)) { selectedGroupId = null; wipeEditor(); }
+  for (const id of collapsedGroups) if (!ids.has(id)) collapsedGroups.delete(id);
+  renderFolders(); renderEntries();
+}
 function renderEditor(entry) {
   wipeEditor(); entryId = entry?.id || null; $('select-entry').hidden = true; $('entry-form').hidden = false;
   for (const group of groups) { const option = element('option', group.name); option.value = group.id; $('entry-group').append(option); }
-  if (entry) $('entry-group').value = entry.groupId;
+  $('entry-group').value = entry ? entry.groupId : selectedGroupId || groups[0]?.id || '';
   for (const [key, id] of [['Title', 'entry-title'], ['UserName', 'entry-username'], ['URL', 'entry-url'], ['Notes', 'entry-notes']]) $(id).value = entry?.fields[key] || '';
   $('entry-password').placeholder = entry?.hasPassword ? 'Сохранён · оставь поле пустым, чтобы не менять' : 'Пароль не задан';
   $('entry-meta').textContent = entry ? `Версий в истории: ${entry.historyCount}. Дополнительных полей: ${entry.customFieldCount}. Они сохраняются при редактировании.` : 'Новая запись. Сначала примени её в памяти, затем добавляй файлы.';
@@ -348,8 +415,9 @@ $('operation-cancel').addEventListener('click', () => {
 });
 $('new-vault').addEventListener('click', () => prepareUnlock('', true));
 $('refresh').addEventListener('click', action(loadFiles));
-$('search').addEventListener('input', renderEntries);
-$('new-entry').addEventListener('click', () => { if (!draftDirty || confirm('Отменить неприменённые изменения?')) renderEditor(null); });
+$('all-folders').addEventListener('click', () => selectFolder(null));
+$('search').addEventListener('input', () => { if (!busy && opened) renderEntries(); });
+$('new-entry').addEventListener('click', () => { if (!busy && opened && (!draftDirty || confirm('Отменить неприменённые изменения?'))) renderEditor(null); });
 $('entry-form').addEventListener('input', (event) => {
   if (event.target.id === 'attachment-file') return;
   draftDirty = true; if (event.target.id === 'entry-password') passwordChanged = true; updateSaveState();
