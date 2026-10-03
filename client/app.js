@@ -306,13 +306,15 @@ $('unlock-form').addEventListener('submit', action(async () => {
   showOperation(createMode ? 'Готовим новое хранилище…' : 'Загружаем зашифрованную базу…', 'Мастер-пароль и ключевой файл остаются в браузере.');
   try {
     const key = keyFile ? await keyFile.arrayBuffer() : undefined;
-    let data;
+    if (epoch !== generation) { key && new Uint8Array(key).fill(0); throw abortError(); }
+    let data, revision = null;
     if (!createMode) {
       const response = await request(`/api/vault?name=${encodeURIComponent(currentName)}`);
-      currentRevision = response.headers.get('X-Vault-Revision'); data = await response.arrayBuffer();
-      if (!currentRevision) throw Object.assign(new Error(), { code: 'OperationFailed' });
+      revision = response.headers.get('X-Vault-Revision'); data = await response.arrayBuffer();
+      if (!revision) throw Object.assign(new Error(), { code: 'OperationFailed' });
     }
     if (epoch !== generation) { key && new Uint8Array(key).fill(0); throw abortError(); }
+    currentRevision = revision;
     launchWorker();
     const args = createMode ? [currentName.slice(0, -5), password, key] : [data, password, key];
     const promise = rpc(createMode ? 'create' : 'unlock', args, [data, key].filter(Boolean));

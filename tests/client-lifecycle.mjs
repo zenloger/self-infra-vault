@@ -28,7 +28,7 @@ async function setup() {
   const grid = new Element(), document = new Element(), window = new Element(), timers = new Map(), requests = [], workers = [];
   document.getElementById = id => nodes[id]; document.createElement = tag => new Element(tag);
   document.querySelector = selector => selector === '.vault-grid' ? grid : nodes[selector.slice(1)]; document.body = new Element();
-  const controls = { put: null, body: null, bodySignal: null, holdOps: new Set() };
+  const controls = { put: null, body: null, bodySignal: null, revision: 'old', holdOps: new Set() };
   let timerId = 0, now = Date.now();
   class ClockDate extends Date { static now() { return now; } }
   for (const node of Object.values(nodes)) node.focus = () => { document.activeElement = node; };
@@ -40,7 +40,7 @@ async function setup() {
     if (path === '/api/vaults') return response({ files: [{ name: 'test.kdbx', size: 512, modified: '2026-01-01T00:00:00Z', revision: 'old' }] });
     if (options.method === 'PUT') return controls.put ? controls.put.promise : response({ name: 'test.version.kdbx', sourceName: 'test.kdbx', revision: 'new' });
     if (path.startsWith('/api/vault?')) {
-      const result = response(new ArrayBuffer(8), { 'X-Vault-Revision': 'old' });
+      const result = response(new ArrayBuffer(8), { 'X-Vault-Revision': controls.revision });
       if (controls.body) {
         const body = controls.body; controls.body = null; controls.bodySignal = options.signal;
         result.arrayBuffer = () => body.promise;
@@ -113,6 +113,26 @@ test('lock aborts a pending body, cancels unlock and permits a clean subsequent 
   assert.equal(controls.bodySignal.aborted, true); assert.equal(run('opened'), false); assert.equal(run('busy'), false);
   assert.equal(nodes['unlock-submit'].disabled, false);
   await unlock(); assert.equal(workers.length, 1); assert.equal(workers[0].terminated, false); assert.equal(run('opened'), true);
+});
+
+test('a cancelled key-file read cannot request or overwrite the subsequently opened vault', async () => {
+  const { nodes, controls, requests, workers, run } = await setup();
+  const keyRead = deferred(), oldKey = new Uint8Array([1, 2, 3, 4]);
+  run("prepareUnlock('old.kdbx', false)");
+  nodes['key-file'].files = [{ size: oldKey.byteLength, arrayBuffer: () => keyRead.promise }];
+  nodes.master.value = 'old synthetic master'; nodes['unlock-form'].emit('submit'); await settle();
+  assert.equal(workers.length, 0); assert.equal(requests.filter(request => request.path.startsWith('/api/vault?')).length, 0);
+  nodes['operation-cancel'].emit('click');
+  run("prepareUnlock('fresh.kdbx', false)"); nodes['key-file'].files = []; controls.revision = 'fresh-revision';
+  nodes.master.value = 'new synthetic master'; nodes['unlock-form'].emit('submit'); await settle();
+  assert.equal(run('opened'), true); assert.equal(run('currentRevision'), 'fresh-revision');
+  const requestCount = requests.length, callCount = workers[0].calls.length;
+  controls.revision = 'stale-revision'; keyRead.resolve(oldKey.buffer); await settle();
+  assert.equal(requests.length, requestCount, 'old file read must not start a GET using new shared state');
+  assert.equal(workers.length, 1); assert.equal(workers[0].calls.length, callCount); assert.equal(workers[0].terminated, false);
+  assert.equal(run('currentName'), 'fresh.kdbx'); assert.equal(run('currentRevision'), 'fresh-revision');
+  assert.equal(run('opened'), true); assert.equal(run('busy'), false); assert.equal(nodes['operation-panel'].hidden, true);
+  assert.deepEqual([...oldKey], [0, 0, 0, 0], 'cancelled key-file bytes are wiped before aborting');
 });
 
 test('inactivity kills the worker and plaintext while retaining only encrypted recovery', async () => {
