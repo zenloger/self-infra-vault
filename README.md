@@ -7,15 +7,17 @@
 
 ## Репозитории
 
-Два независимых приватных Git-репозитория на собственном сервере:
+Два независимых Git-репозитория:
 
 ```sh
-git clone zenlog@zenlog.pro:/home/zenlog/repositories/zenlog-site.git
-git clone zenlog@zenlog.pro:/home/zenlog/repositories/zenlog-vault.git
+git clone git@github.com:zenloger/self-infra-landing.git
+git clone git@github.com:zenloger/self-infra-vault.git
 ```
 
 Первый содержит сайт-портфолио, второй — это приложение. В Git нет баз KDBX,
 паролей, OAuth-токенов, сертификатов с ключами или рабочей конфигурации.
+Приватные копии на собственном сервере сохранены в
+`/home/zenlog/repositories/zenlog-site.git` и `/home/zenlog/repositories/zenlog-vault.git`.
 
 ## Использование
 
