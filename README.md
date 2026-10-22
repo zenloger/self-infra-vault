@@ -1,6 +1,6 @@
 # zenlog vault
 
-Хранилище паролей и сертификатов на **https://secret.zenlog.pro**.
+Хранилище паролей и сертификатов на **https://vault.zenlog.pro**.
 Сервер авторизует пользователя через Яндекс и передаёт зашифрованные файлы
 из `disk:/secret/*.kdbx`. Браузер открывает и изменяет KeePass-базу локально.
 Мастер-пароль, keyfile, записи и вложения не отправляются в API приложения.
@@ -48,7 +48,7 @@ git clone git@github.com:zenloger/self-infra-vault.git
 
 Пошаговая настройка: [docs/YANDEX_SETUP.md](docs/YANDEX_SETUP.md).
 Нужен зарегистрированный OAuth Client ID и callback
-`https://secret.zenlog.pro/auth/callback`. PKCE не требует client secret.
+`https://vault.zenlog.pro/auth/callback`. PKCE не требует client secret.
 Конфигурация лежит только в `/etc/zenlog-vault.env`, права `0600`.
 Без Client ID приложение показывает, что вход ещё не настроен.
 
@@ -78,8 +78,8 @@ node scripts/check-bundle.mjs
 ## Публикация
 
 Первичная подготовка сервера: Python 3.12 с пакетом `python3.12-venv`, nginx,
-Certbot и отдельный сертификат `secret.zenlog.pro`. Для HTTP-01 до выпуска
-сертификата предусмотрен `deploy/secret-http.conf`. Для продления используется
+Certbot и отдельный сертификат `vault.zenlog.pro`. Для HTTP-01 до выпуска
+сертификата предусмотрен `deploy/vault-http.conf`. Для продления используется
 общий webroot `/var/lib/letsencrypt` и deploy-hook проверки/перезагрузки nginx.
 
 После `npm ci --ignore-scripts && npm run build` скопировать `dist/` в серверную

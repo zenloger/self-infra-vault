@@ -194,7 +194,7 @@ def test_network_error_is_redacted():
 def test_token_exchange_pkce_and_identity():
     provider, calls = queued(Response(data={"access_token": "token"}),
                              Response(data={"id": "123", "login": "zenlog", "client_id": "client-id"}))
-    assert provider.exchange("private-code", "verifier", "https://secret.zenlog.pro/auth/callback") == "token"
+    assert provider.exchange("private-code", "verifier", "https://vault.zenlog.pro/auth/callback") == "token"
     assert calls[0][1] == "https://oauth.yandex.ru/token"
     assert calls[0][2]["data"]["code_verifier"] == "verifier"
     assert "client_secret" not in calls[0][2]["data"]

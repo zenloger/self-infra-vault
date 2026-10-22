@@ -34,7 +34,7 @@ def version_name(name):
 def create_app(config=None, provider=None):
     app = Flask(__name__, static_folder=None)
     app.config.from_mapping(
-        PUBLIC_ORIGIN=os.environ.get("PUBLIC_ORIGIN", "https://secret.zenlog.pro"),
+        PUBLIC_ORIGIN=os.environ.get("PUBLIC_ORIGIN", "https://vault.zenlog.pro"),
         YANDEX_CLIENT_ID=os.environ.get("YANDEX_CLIENT_ID", ""),
         YANDEX_CLIENT_SECRET=os.environ.get("YANDEX_CLIENT_SECRET", ""),
         MAX_CONTENT_LENGTH=MAX_FILE_BYTES,

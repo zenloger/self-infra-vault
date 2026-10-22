@@ -1,6 +1,6 @@
 # Подключение Яндекс ID и Диска
 
-Публичный адрес приложения: `https://secret.zenlog.pro`.
+Публичный адрес приложения: `https://vault.zenlog.pro`.
 Для первого входа владелец должен зарегистрировать OAuth-приложение Яндекса
 и указать его **ClientID** в конфигурации сервера. Мастер-пароль KDBX при этой
 настройке не нужен. Не отправляйте пароли, токены, key files и client secret
@@ -12,10 +12,10 @@
    приложения и создайте новое приложение по
    [официальной инструкции](https://yandex.ru/dev/id/doc/ru/register-api).
 2. Выберите платформу веб-сервиса. Укажите адрес сервиса
-   `https://secret.zenlog.pro` и точный Redirect URI:
+   `https://vault.zenlog.pro` и точный Redirect URI:
 
    ```text
-   https://secret.zenlog.pro/auth/callback
+   https://vault.zenlog.pro/auth/callback
    ```
 
 3. В доступах добавьте следующие два права API Яндекс Диска:
@@ -74,7 +74,7 @@ sudo systemctl is-active zenlog-vault
 
 ## Первый вход и проверка
 
-1. Откройте [secret.zenlog.pro](https://secret.zenlog.pro) и нажмите вход через
+1. Откройте [vault.zenlog.pro](https://vault.zenlog.pro) и нажмите вход через
    Яндекс. Проверьте, что переход ведёт на `oauth.yandex.ru`, затем подтвердите
    доступ именно к созданному приложению.
 2. После возврата на сайт должен отображаться ваш аккаунт и список

@@ -10,7 +10,7 @@ from server.provider import MAGIC, ProviderConflict, ProviderError, ProviderPend
 from server.state import MemoryState, StateFull
 
 
-ORIGIN = "https://secret.zenlog.pro"
+ORIGIN = "https://vault.zenlog.pro"
 DATA = MAGIC + b"encrypted fixture, not a parsed database"
 
 
@@ -105,7 +105,7 @@ def test_session_cookie_no_secrets_and_security_headers(setup):
 def test_oauth_pkce_state_rotation_replay_and_separation(setup):
     app, client, provider = setup
     response = call(client, "/auth/login")
-    old_cookie = client.get_cookie(COOKIE, domain="secret.zenlog.pro").value
+    old_cookie = client.get_cookie(COOKIE, domain="vault.zenlog.pro").value
     params = parse_qs(urlsplit(response.location).query)
     oauth = app.extensions["vault_state"].get(old_cookie).oauth
     expected = base64.urlsafe_b64encode(hashlib.sha256(oauth["verifier"].encode()).digest()).decode().rstrip("=")
@@ -116,7 +116,7 @@ def test_oauth_pkce_state_rotation_replay_and_separation(setup):
     query = {"state": params["state"][0], "code": "one"}
     response = call(client, "/auth/callback", query_string=query)
     assert response.location == "/"
-    assert client.get_cookie(COOKIE, domain="secret.zenlog.pro").value != old_cookie
+    assert client.get_cookie(COOKIE, domain="vault.zenlog.pro").value != old_cookie
     assert app.extensions["vault_state"].get(old_cookie) is None
     assert provider.exchanges == [("one", oauth["verifier"], ORIGIN + "/auth/callback")]
     assert call(client, "/auth/callback", query_string=query).location == "/?auth=failed"
@@ -138,7 +138,7 @@ def test_expired_state_and_denial(setup):
     app, client, provider = setup
     response = call(client, "/auth/login")
     query = parse_qs(urlsplit(response.location).query)
-    sid = client.get_cookie(COOKIE, domain="secret.zenlog.pro").value
+    sid = client.get_cookie(COOKIE, domain="vault.zenlog.pro").value
     app.extensions["vault_state"].get(sid).oauth["expires"] = 0
     assert call(client, "/auth/callback", query_string={"state": query["state"][0], "code": "one"}).location == "/?auth=failed"
     assert provider.exchanges == []
@@ -260,9 +260,9 @@ def test_logout_and_expiration(setup):
     session = login(client)
     assert call(client, "/auth/logout", method="POST", headers=mutation_headers(session)).status_code == 200
     assert call(client, "/api/vaults").status_code == 401
-    assert client.get_cookie(COOKIE, domain="secret.zenlog.pro") is None
+    assert client.get_cookie(COOKIE, domain="vault.zenlog.pro") is None
     login(client)
-    sid = client.get_cookie(COOKIE, domain="secret.zenlog.pro").value
+    sid = client.get_cookie(COOKIE, domain="vault.zenlog.pro").value
     app.extensions["vault_state"].get(sid).expires = 0
     assert call(client, "/api/vaults").status_code == 401
 
